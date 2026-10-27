@@ -45,9 +45,9 @@ export const EmployerDashboard: React.FC<{ onNavigate: (tab: string) => void }> 
   const industryWorkers = workers.filter(w => w.industry === industry);
   const totalWorkers = industryWorkers.length;
 
-  // Active workers on shift right now
+  // Active workers on shift right now (in-progress or missing checkout)
   const onShiftRecords = attendance.filter(
-    a => a.industry === industry && (a.status === 'active' || !a.checkOutTime)
+    a => a.industry === industry && (a.status === 'in_progress' || a.status === 'active' || !a.checkOutTime)
   );
   const onShiftCount = onShiftRecords.length;
 
@@ -60,7 +60,9 @@ export const EmployerDashboard: React.FC<{ onNavigate: (tab: string) => void }> 
     completedRecords.reduce((acc, c) => acc + c.overtimeHours, 0) * 10
   ) / 10;
 
-  const attendanceRate = totalWorkers > 0 ? Math.round((Math.max(onShiftCount, 3) / totalWorkers) * 100) : 92;
+  const attendanceRate = totalWorkers > 0 
+    ? Math.min(100, Math.round(((onShiftCount + completedRecords.length) / totalWorkers) * 100)) 
+    : 100;
 
   const pendingSafetyReports = safetyReports.filter(
     r => r.industry === industry && r.status !== 'resolved'
@@ -165,7 +167,7 @@ export const EmployerDashboard: React.FC<{ onNavigate: (tab: string) => void }> 
             <span>On Shift</span>
             <Clock className="w-4 h-4 text-emerald-400" />
           </div>
-          <div className="text-2xl font-black text-emerald-400 mt-1">{Math.max(onShiftCount, 3)}</div>
+          <div className="text-2xl font-black text-emerald-400 mt-1">{onShiftCount}</div>
           <div className="text-[10px] text-emerald-400 flex items-center gap-1 mt-1">
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
             Active now

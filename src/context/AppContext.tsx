@@ -26,6 +26,7 @@ import {
   INITIAL_FATIGUE_ALERTS 
 } from '../data/initialData';
 import { translations } from '../i18n/translations';
+import { calculateWorkingDuration } from '../utils/timeCalculation';
 
 interface AppContextType {
   industry: IndustryType;
@@ -47,8 +48,9 @@ interface AppContextType {
   // Attendance & Time clock
   attendance: AttendanceRecord[];
   activeShift: AttendanceRecord | undefined;
-  clockIn: (verificationMethod?: AttendanceVerification, locationTag?: string) => { success: boolean; message: string };
-  clockOut: (notes?: string) => { success: boolean; message: string };
+  clockIn: (verificationMethod?: AttendanceVerification, locationTag?: string, customInTime?: string) => { success: boolean; message: string };
+  clockOut: (notes?: string, customOutTime?: string, customBreakMinutes?: number) => { success: boolean; message: string };
+  addAttendanceRecord: (record: Omit<AttendanceRecord, 'id'>) => AttendanceRecord;
   
   // Wage rules & Payroll
   wageConfigs: Record<string, WageConfig>;
@@ -180,25 +182,26 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     return sec?.[key] || (translations.en[section] as any)?.[key] || key;
   };
 
-  // Find active clock-in for the current worker
+  // Find active clock-in for the current worker (unclosed shift)
   const activeShift = attendance.find(
-    a => a.workerId === currentWorker.id && (a.status === 'active' || !a.checkOutTime)
+    a => a.workerId === currentWorker.id && (a.status === 'in_progress' || a.status === 'active' || a.checkOutTime === null || a.checkOutTime === undefined)
   );
 
   // Clock-in handler
-  const clockIn = (verificationMethod: AttendanceVerification = 'qr', locationTag?: string) => {
+  const clockIn = (verificationMethod: AttendanceVerification = 'qr', locationTag?: string, customInTime?: string) => {
     if (activeShift) {
-      return { success: false, message: 'You already have an active clock-in session. Clock out first.' };
+      return { success: false, message: 'You already have an active shift in progress. Clock out first.' };
     }
 
     const now = new Date();
     const today = now.toISOString().split('T')[0];
-    const timeStr = now.toTimeString().substring(0, 5);
+    const timeStr = customInTime || now.toTimeString().substring(0, 5);
 
     const defaultLocation = industry === 'construction' 
       ? 'Construction Site Sector 4 - Main Pier' 
       : 'Campus Facility Administration Block';
 
+    // Requirement 4: Save check-in timestamp, set check-out timestamp to null, status: IN PROGRESS
     const newRecord: AttendanceRecord = {
       id: `att-${Date.now()}`,
       workerId: currentWorker.id,
@@ -207,62 +210,66 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       department: currentWorker.department,
       date: today,
       checkInTime: timeStr,
-      checkOutTime: undefined,
+      checkOutTime: null, // Explicitly null as required
+      elapsedHours: 0,
       regularHours: 0,
       overtimeHours: 0,
       breakMinutes: 0,
-      status: 'active',
+      regularPay: 0,
+      overtimePay: 0,
+      totalPay: 0,
+      status: 'in_progress', // Requirement 4: IN PROGRESS status
       verificationMethod: verificationMethod,
       locationTag: locationTag || defaultLocation,
       notes: 'Logged via FairShift Time Clock',
+      isDemo: false, // Requirement 11: Real attendance record
     };
 
     setAttendance(prev => [newRecord, ...prev]);
 
     return { 
       success: true, 
-      message: `Clocked in successfully at ${timeStr} with ${verificationMethod.toUpperCase()} verification.` 
+      message: `Clocked in at ${timeStr}. Shift status: IN PROGRESS (${verificationMethod.toUpperCase()}).` 
     };
   };
 
-  // Clock-out handler
-  const clockOut = (notes?: string) => {
+  // Clock-out handler: calculates actual working duration using exact timestamps
+  const clockOut = (notes?: string, customOutTime?: string, customBreakMinutes?: number) => {
     if (!activeShift) {
       return { success: false, message: 'No active clock-in found to clock out from.' };
     }
 
     const now = new Date();
-    const timeStr = now.toTimeString().substring(0, 5);
+    const outTimeStr = customOutTime || now.toTimeString().substring(0, 5);
     
-    // Parse checkIn and calculate duration
-    const [inH, inM] = activeShift.checkInTime.split(':').map(Number);
-    const [outH, outM] = timeStr.split(':').map(Number);
-    
-    let totalMinutes = (outH * 60 + outM) - (inH * 60 + inM);
-    if (totalMinutes <= 0) {
-      // If same minute or simulated demo turn, award at least standard session or realistic delta
-      totalMinutes = 480; // 8 hours for demo realism if clicked quickly
-    }
+    // Requirement 1 & 2 & 5 & 6 & 7 & 8: Calculate actual working duration using timestamps
+    const calc = calculateWorkingDuration(
+      activeShift.checkInTime,
+      outTimeStr,
+      {
+        hourlyRate: currentWorker.hourlyRate,
+        overtimeMultiplier: wageConfigs[currentWorker.industry]?.overtimeMultiplier || 1.5,
+        breakMinutes: customBreakMinutes,
+        autoBreakRule: typeof customBreakMinutes === 'number' ? false : true,
+      }
+    );
 
-    const breakMinutes = totalMinutes > 300 ? 60 : 30; // 1h break if shift > 5h
-    const netWorkedMinutes = Math.max(30, totalMinutes - breakMinutes);
-    const totalHoursWorked = Math.round((netWorkedMinutes / 60) * 10) / 10;
-
-    const standardDay = wageConfigs[currentWorker.industry]?.standardWorkDayHours || 8;
-    const regularHours = Math.min(standardDay, totalHoursWorked);
-    const overtimeHours = Math.max(0, Math.round((totalHoursWorked - standardDay) * 10) / 10);
-
-    const isFatigueTriggered = totalHoursWorked >= 10.5;
+    const isFatigueTriggered = calc.elapsedHours >= 10.5;
 
     const updatedRecord: AttendanceRecord = {
       ...activeShift,
-      checkOutTime: timeStr,
-      regularHours,
-      overtimeHours,
-      breakMinutes,
+      checkOutTime: outTimeStr,
+      elapsedHours: calc.elapsedHours,
+      regularHours: calc.regularHours,
+      overtimeHours: calc.overtimeHours,
+      breakMinutes: calc.breakMinutes,
+      regularPay: calc.regularPay,
+      overtimePay: calc.overtimePay,
+      totalPay: calc.totalPay,
       status: 'completed',
       notes: notes || activeShift.notes,
-      fatigueWarning: isFatigueTriggered
+      fatigueWarning: isFatigueTriggered,
+      isDemo: false,
     };
 
     setAttendance(prev => prev.map(a => a.id === activeShift.id ? updatedRecord : a));
@@ -273,10 +280,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         id: `fat-${Date.now()}`,
         workerId: currentWorker.id,
         workerName: currentWorker.name,
-        severity: totalHoursWorked > 12 ? 'high' : 'medium',
-        reason: `Exceeded ${totalHoursWorked} working hours today (${overtimeHours}h overtime).`,
-        reasonTamil: `இன்று ${totalHoursWorked} மணி நேரம் பணிபுரிந்துள்ளார் (${overtimeHours} மணி கூடுதல் பணி).`,
-        consecutiveHours: totalHoursWorked,
+        severity: calc.elapsedHours > 12 ? 'high' : 'medium',
+        reason: `Exceeded ${calc.elapsedHours} working hours today (${calc.overtimeHours}h overtime).`,
+        reasonTamil: `இன்று ${calc.elapsedHours} மணி நேரம் பணிபுரிந்துள்ளார் (${calc.overtimeHours} மணி கூடுதல் பணி).`,
+        consecutiveHours: calc.elapsedHours,
         restHoursBetweenShifts: 10,
         recommendation: 'Mandatory 11-hour rest period enforced. Overtime cap recommended.',
         recommendationTamil: 'அடுத்த பணிக்கு முன் 11 மணிநேர ஓய்வு கட்டாயமாகும்.',
@@ -287,8 +294,40 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     return {
       success: true,
-      message: `Clocked out at ${timeStr}. Regular: ${regularHours}h | Overtime: ${overtimeHours}h | Rest break: ${breakMinutes}m.`
+      message: `Clocked out at ${outTimeStr}. Working Time: ${calc.netHours}h (Regular: ${calc.regularHours}h | Overtime: ${calc.overtimeHours}h | Break: ${calc.breakMinutes}m) | Pay: ₹${calc.totalPay}.`
     };
+  };
+
+  // Add arbitrary attendance record (useful for test cases, manual adjustments, and audit)
+  const addAttendanceRecord = (recordData: Omit<AttendanceRecord, 'id'>) => {
+    const calc = calculateWorkingDuration(
+      recordData.checkInTime,
+      recordData.checkOutTime,
+      {
+        hourlyRate: currentWorker.hourlyRate,
+        overtimeMultiplier: wageConfigs[currentWorker.industry]?.overtimeMultiplier || 1.5,
+        breakMinutes: recordData.breakMinutes,
+        autoBreakRule: false,
+      }
+    );
+
+    const isComplete = recordData.status === 'completed' && recordData.checkOutTime !== null && recordData.checkOutTime !== undefined;
+
+    const newRecord: AttendanceRecord = {
+      ...recordData,
+      id: `att-${Date.now()}`,
+      elapsedHours: isComplete ? calc.elapsedHours : 0,
+      regularHours: isComplete ? calc.regularHours : 0,
+      overtimeHours: isComplete ? calc.overtimeHours : 0,
+      regularPay: isComplete ? calc.regularPay : 0,
+      overtimePay: isComplete ? calc.overtimePay : 0,
+      totalPay: isComplete ? calc.totalPay : 0,
+      status: recordData.status,
+      isDemo: recordData.isDemo ?? false,
+    };
+
+    setAttendance(prev => [newRecord, ...prev]);
+    return newRecord;
   };
 
   const addWorker = (newWorkerData: Omit<WorkerProfile, 'id'>) => {
@@ -330,23 +369,23 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     const worker = workers.find(w => w.id === workerId) || currentWorker;
     const config = wageConfigs[worker.industry] || INITIAL_WAGE_CONFIGS.construction;
 
-    // Filter attendance in past 7 days for this worker
+    // Filter attendance in past 7 days for completed shifts only
     const workerRecords = attendance.filter(a => a.workerId === worker.id && a.status === 'completed');
-    const regularHours = workerRecords.reduce((acc, curr) => acc + curr.regularHours, 0) || 40;
-    const overtimeHours = workerRecords.reduce((acc, curr) => acc + curr.overtimeHours, 0) || 5;
+    const regularHours = Math.round(workerRecords.reduce((acc, curr) => acc + curr.regularHours, 0) * 100) / 100;
+    const overtimeHours = Math.round(workerRecords.reduce((acc, curr) => acc + curr.overtimeHours, 0) * 100) / 100;
 
     const regularRate = worker.hourlyRate;
-    const regularPay = Math.round(regularHours * regularRate);
-    const overtimeRate = regularRate * config.overtimeMultiplier;
-    const overtimePay = Math.round(overtimeHours * overtimeRate);
+    const regularPay = Math.round(regularHours * regularRate * 100) / 100;
+    const overtimeRate = Math.round(regularRate * config.overtimeMultiplier * 100) / 100;
+    const overtimePay = Math.round(overtimeHours * overtimeRate * 100) / 100;
     const hazardAllowance = workerRecords.length * config.hazardPayDaily;
 
-    const grossPay = regularPay + overtimePay + hazardAllowance;
-    const providentFund = Math.round(grossPay * 0.06); // 6% PF
-    const employeeStateInsurance = Math.round(grossPay * 0.015); // 1.5% ESI
+    const grossPay = Math.round((regularPay + overtimePay + hazardAllowance) * 100) / 100;
+    const providentFund = Math.round(grossPay * 0.06 * 100) / 100; // 6% PF
+    const employeeStateInsurance = Math.round(grossPay * 0.015 * 100) / 100; // 1.5% ESI
     const advanceDeduction = 0;
 
-    const netPay = grossPay - (providentFund + employeeStateInsurance + advanceDeduction);
+    const netPay = Math.round((grossPay - (providentFund + employeeStateInsurance + advanceDeduction)) * 100) / 100;
 
     const newRecord: PayrollRecord = {
       id: `PAY-${Date.now()}-${worker.id.toUpperCase()}`,
@@ -563,6 +602,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         activeShift,
         clockIn,
         clockOut,
+        addAttendanceRecord,
         wageConfigs,
         updateWageConfig,
         payrollRecords,

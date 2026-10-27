@@ -21,7 +21,7 @@ export interface WorkerProfile {
 }
 
 export type AttendanceVerification = 'qr' | 'geofence_simulated' | 'manual';
-export type AttendanceStatus = 'present' | 'active' | 'completed' | 'flagged' | 'absent';
+export type AttendanceStatus = 'present' | 'active' | 'in_progress' | 'completed' | 'flagged' | 'absent';
 
 export interface AttendanceRecord {
   id: string;
@@ -31,15 +31,20 @@ export interface AttendanceRecord {
   department: string;
   date: string; // YYYY-MM-DD
   checkInTime: string; // HH:mm or ISO
-  checkOutTime?: string; // HH:mm or ISO
-  regularHours: number;
-  overtimeHours: number;
-  breakMinutes: number;
+  checkOutTime?: string | null; // HH:mm or ISO or null for in-progress
+  elapsedHours?: number; // Total duration before breaks
+  regularHours: number; // Max 8 hours
+  overtimeHours: number; // Working time beyond 8 hours
+  breakMinutes: number; // Deducted break time
+  regularPay?: number; // Regular Hours * Hourly Rate
+  overtimePay?: number; // Overtime Hours * Hourly Rate * 1.5
+  totalPay?: number; // Regular Pay + Overtime Pay
   status: AttendanceStatus;
   verificationMethod: AttendanceVerification;
   locationTag: string;
   notes?: string;
   fatigueWarning?: boolean;
+  isDemo?: boolean; // Distinguish demo seed data from live user attendance
 }
 
 export type SafetyCategory = 

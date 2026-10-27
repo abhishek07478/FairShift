@@ -80,7 +80,7 @@ export const WorkerDashboard: React.FC<{ onNavigate: (tab: string) => void }> = 
   const estEarnings = Math.round(
     (totalRegularHrs * currentWorker.hourlyRate) + 
     (totalOtHrs * currentWorker.hourlyRate * 1.5) +
-    (workerAttendance.length * (currentWorker.industry === 'construction' ? 150 : 100))
+    (workerAttendance.filter(a => a.status === 'completed').length * (currentWorker.industry === 'construction' ? 150 : 100))
   );
 
   const pendingSafetyCount = safetyReports.filter(
