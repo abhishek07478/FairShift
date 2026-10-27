@@ -1,0 +1,6 @@
+{
+  "name": "FairShift",
+  "description": "AI-Powered Decent Work & Ethical Workforce Platform aligned with UN SDG 8",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
